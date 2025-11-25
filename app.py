@@ -27,6 +27,7 @@ from pdf2image import convert_from_bytes  # PDF 轉換為圖像
 # ===== 設定常數 =====
 IMAGE_FOLDERS = [Path("images")]  # 圖像儲存資料夾
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}  # 支援的圖像格式
+PDF_CATALOG_FOLDER = Path("catalog")  # PDF 檔案儲存資料夾
 MODEL_NAME = "clip-vit-b-32"  # 模型名稱
 INDEX_DIR = Path("metadata-files") / MODEL_NAME  # 索引檔案目錄
 PATHS_FILE = INDEX_DIR / "paths.npz"  # 圖像路徑檔案
@@ -425,6 +426,36 @@ def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
 
 
 # ===== PDF 處理函數 =====
+def save_pdf_to_catalog(pdf_file: UploadedFile, catalog_folder: Path) -> Path:
+    """
+    將上傳的 PDF 保存到 catalog 資料夾
+    
+    參數:
+        pdf_file: 上傳的 PDF 檔案
+        catalog_folder: 目標資料夾
+    
+    返回:
+        保存的 PDF 路徑
+    """
+    catalog_folder.mkdir(parents=True, exist_ok=True)
+    
+    pdf_filename = Path(pdf_file.name).name
+    dest_path = catalog_folder / pdf_filename
+    
+    # 避免重複檔名
+    counter = 1
+    stem = Path(pdf_file.name).stem
+    while dest_path.exists():
+        dest_path = catalog_folder / f"{stem}_{counter}.pdf"
+        counter += 1
+    
+    # 保存 PDF
+    with open(dest_path, "wb") as f:
+        f.write(pdf_file.read())
+    
+    return dest_path
+
+
 def extract_images_from_pdf(pdf_file: UploadedFile, output_folder: Path) -> Tuple[List[Path], str]:
     """
     從 PDF 擷取所有頁面圖片並存檔
@@ -536,7 +567,12 @@ if view_mode == "Indexing":
                     try:
                         st.info(f"Processing: {pdf_file.name}")
                         
+                        # 保存 PDF 到 catalog 資料夾
+                        pdf_path = save_pdf_to_catalog(pdf_file, PDF_CATALOG_FOLDER)
+                        st.success(f"✓ Saved PDF to: {pdf_path}")
+                        
                         # 擷取圖片
+                        pdf_file.seek(0)  # 重置檔案指針
                         image_paths, pdf_filename = extract_images_from_pdf(pdf_file, output_folder)
                         
                         # 擷取文字
