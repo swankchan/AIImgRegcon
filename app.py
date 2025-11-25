@@ -82,6 +82,12 @@ def load_metadata_arrays() -> Tuple[List[str], np.ndarray]:
     return paths, features
 
 
+def normalize_path_key(path_str: str) -> str:
+    """正規化路徑以支援絕對路徑和相對路徑的互操作性"""
+    p = Path(path_str).resolve()
+    return str(p)
+
+
 def load_all_metadata() -> Dict[str, Dict]:
     """載入所有圖像的標題和關鍵字中繼資料"""
     if not METADATA_FILE.exists():
@@ -90,18 +96,33 @@ def load_all_metadata() -> Dict[str, Dict]:
         with open(METADATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, dict):
-                return data
+                # 將所有相對路徑轉換為絕對路徑以確保一致性
+                normalized = {}
+                for key, val in data.items():
+                    norm_key = normalize_path_key(key)
+                    normalized[norm_key] = val
+                return normalized
     except Exception:
         pass
     return {}
 
 
 def save_metadata_file(metadata: Dict[str, Dict]):
-    """儲存中繼資料到 JSON 檔案"""
+    """儲存中繼資料到 JSON 檔案（使用相對路徑以增進可移植性）"""
     ensure_index_dir()
     try:
+        # 將絕對路徑轉換為相對路徑以提高可移植性
+        relative_meta: Dict[str, Dict] = {}
+        for abs_path, data in metadata.items():
+            try:
+                rel_path = str(Path(abs_path).relative_to(Path.cwd()))
+            except ValueError:
+                # 若路徑無法相對化，則使用原始路徑
+                rel_path = abs_path
+            relative_meta[rel_path] = data
+        
         with open(METADATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+            json.dump(relative_meta, f, ensure_ascii=False, indent=2)
     except Exception as exc:
         st.warning(f"儲存中繼資料失敗: {exc}")
 
