@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual env
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Large image backup folder (already present in this workspace)
+images backup/
+
+# Data / caches
+*.npz
+*.npy
+*.idx
+*.pkl
+
+# Streamlit cache
+.streamlit/
+
+# Logs
+*.log
+
+# Ignore secrets if any
+secrets.json
+
+# Keep metadata-files (index) tracked by default; adjust if you want to ignore it
+# metadata-files/
