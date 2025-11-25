@@ -17,17 +17,17 @@ from streamlit.runtime.uploaded_file_manager import UploadedFile
 # PDF 處理相關
 try:
     import PyPDF2
+    import fitz  # PyMuPDF
     from pdf2image import convert_from_bytes
     PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
-import PyPDF2  # PDF 文件處理
-from pdf2image import convert_from_bytes  # PDF 轉換為圖像
 
 # ===== 設定常數 =====
 IMAGE_FOLDERS = [Path("images")]  # 圖像儲存資料夾
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}  # 支援的圖像格式
 PDF_CATALOG_FOLDER = Path("catalog")  # PDF 檔案儲存資料夾
+# POPPLER_PATH = r".\poppler-25.11.0\Library\bin"  # Poppler 路徑
 MODEL_NAME = "clip-vit-b-32"  # 模型名稱
 INDEX_DIR = Path("metadata-files") / MODEL_NAME  # 索引檔案目錄
 PATHS_FILE = INDEX_DIR / "paths.npz"  # 圖像路徑檔案
@@ -458,7 +458,7 @@ def save_pdf_to_catalog(pdf_file: UploadedFile, catalog_folder: Path) -> Path:
 
 def extract_images_from_pdf(pdf_file: UploadedFile, output_folder: Path) -> Tuple[List[Path], str]:
     """
-    從 PDF 擷取所有頁面圖片並存檔
+    從 PDF 擷取所有內嵌圖片並存檔
     
     參數:
         pdf_file: 上傳的 PDF 檔案
@@ -468,31 +468,69 @@ def extract_images_from_pdf(pdf_file: UploadedFile, output_folder: Path) -> Tupl
         (圖片路徑列表, PDF 檔案名稱)
     """
     if not PDF_SUPPORT:
-        raise ImportError("PDF support not available. Install PyPDF2 and pdf2image.")
+        raise ImportError("PDF support not available. Install PyMuPDF (fitz).")
     
     pdf_filename = Path(pdf_file.name).stem  # PDF 檔名（無副檔名）
     pdf_bytes = pdf_file.read()
     
-    # 使用 pdf2image 將每頁轉換為圖片
-    images = convert_from_bytes(pdf_bytes)
+    # 使用 PyMuPDF 開啟 PDF
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     image_paths: List[Path] = []
     
     output_folder.mkdir(parents=True, exist_ok=True)
     
-    for page_idx, img in enumerate(images, start=1):
-        # 圖片檔名格式: pdfname_page1.jpg, pdfname_page2.jpg ...
-        img_filename = f"{pdf_filename}_page{page_idx}.jpg"
-        img_path = output_folder / img_filename
+    img_counter = 1
+    
+    # 遍歷每一頁
+    for page_num in range(len(doc)):
+        page = doc[page_num]
         
-        # 避免重複檔名
-        counter = 1
-        while img_path.exists():
-            img_filename = f"{pdf_filename}_page{page_idx}_{counter}.jpg"
-            img_path = output_folder / img_filename
-            counter += 1
+        # 獲取頁面中的所有圖片
+        image_list = page.get_images(full=True)
         
-        img.save(img_path, "JPEG", quality=85)
-        image_paths.append(img_path)
+        for img_index, img_info in enumerate(image_list):
+            xref = img_info[0]  # 圖片的 xref 編號
+            
+            try:
+                # 提取圖片
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]  # 圖片格式（png, jpeg 等）
+                
+                # 轉換為 PIL Image
+                img = Image.open(BytesIO(image_bytes))
+                
+                # 圖片檔名格式: pdfname_img1.jpg, pdfname_img2.jpg ...
+                img_filename = f"{pdf_filename}_img{img_counter}.jpg"
+                img_path = output_folder / img_filename
+                
+                # 避免重複檔名
+                counter = 1
+                while img_path.exists():
+                    img_filename = f"{pdf_filename}_img{img_counter}_{counter}.jpg"
+                    img_path = output_folder / img_filename
+                    counter += 1
+                
+                # 保存為 JPEG
+                if img.mode in ("RGBA", "LA", "P"):
+                    # 轉換透明背景為白色
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "P":
+                        img = img.convert("RGBA")
+                    background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                    img = background
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+                
+                img.save(img_path, "JPEG", quality=85)
+                image_paths.append(img_path)
+                img_counter += 1
+                
+            except Exception as e:
+                st.warning(f"無法提取圖片 (page {page_num + 1}, img {img_index + 1}): {str(e)}")
+                continue
+    
+    doc.close()
     
     return image_paths, pdf_filename
 
@@ -520,6 +558,53 @@ def extract_text_from_pdf(pdf_file: UploadedFile) -> str:
             all_text.append(text)
     
     return "\n\n".join(all_text)
+
+
+def extract_keywords_from_text(text: str, max_keywords: int = 5) -> List[str]:
+    """
+    從文字中提取關鍵字
+    
+    參數:
+        text: 文字內容
+        max_keywords: 最多返回多少個關鍵字
+    
+    返回:
+        關鍵字列表
+    """
+    import re
+    from collections import Counter
+    
+    # 常見停用詞（中英文）
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+        "will", "would", "could", "should", "may", "might", "can", "this", "that", "these", "those",
+        "i", "you", "he", "she", "it", "we", "they", "them", "their", "its", "our", "your",
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "個", "上", "也", "說",
+        "出", "到", "時", "要", "以", "用", "著", "能", "之", "會", "後", "然", "沒", "很", "好", "來",
+        "page", "pages", "document", "file", "pdf", "image", "fig", "figure"
+    }
+    
+    # 移除特殊字符，保留字母、數字、中文
+    text = text.lower()
+    words = re.findall(r'\b\w+\b', text)
+    
+    # 過濾停用詞和太短的詞
+    filtered_words = [
+        word for word in words 
+        if len(word) >= 3 and word not in stop_words
+    ]
+    
+    # 統計詞頻
+    word_counts = Counter(filtered_words)
+    
+    # 取最常見的關鍵字
+    top_keywords = [word for word, count in word_counts.most_common(max_keywords * 2)]
+    
+    # 過濾純數字
+    keywords = [kw for kw in top_keywords if not kw.isdigit()][:max_keywords]
+    
+    return keywords
 
 
 # ===== Streamlit UI 應用程式 =====
@@ -579,11 +664,15 @@ if view_mode == "Indexing":
                         pdf_file.seek(0)  # 重置檔案指針
                         extracted_text = extract_text_from_pdf(pdf_file)
                         
+                        # 提取關鍵字
+                        suggested_keywords = extract_keywords_from_text(extracted_text, max_keywords=5)
+                        
                         all_extracted_images.extend(image_paths)
                         all_pdf_data.append({
                             "image_paths": image_paths,
                             "pdf_filename": pdf_filename,
-                            "extracted_text": extracted_text
+                            "extracted_text": extracted_text,
+                            "suggested_keywords": suggested_keywords
                         })
                         
                         st.success(f"✓ Extracted {len(image_paths)} images from {pdf_file.name}")
@@ -620,6 +709,9 @@ if view_mode == "Indexing":
                 
                 # 為每張圖片輸入 keywords
                 cols = st.columns(2)
+                suggested_keywords = pdf_data.get("suggested_keywords", [])
+                default_keywords_str = ", ".join(suggested_keywords)
+                
                 for idx, img_path in enumerate(image_paths):
                     col = cols[idx % 2]
                     with col:
@@ -632,8 +724,8 @@ if view_mode == "Indexing":
                         keywords_input = st.text_input(
                             f"Keywords for {img_path.name}",
                             key=keywords_key,
-                            placeholder="keyword1, keyword2, keyword3",
-                            help="Enter comma-separated keywords"
+                            value=default_keywords_str,
+                            help="Enter comma-separated keywords (auto-suggested from PDF text)"
                         )
                         
                         st.session_state["pdf_keywords_input"][str(img_path)] = keywords_input
