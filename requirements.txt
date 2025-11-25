@@ -5,3 +5,6 @@ torch
 torchvision
 open_clip_torch
 faiss-cpu
+PyPDF2
+PyMuPDF
+pdf2image

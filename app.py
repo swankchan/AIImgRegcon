@@ -27,7 +27,8 @@ except ImportError:
 IMAGE_FOLDERS = [Path("images")]  # 圖像儲存資料夾
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}  # 支援的圖像格式
 PDF_CATALOG_FOLDER = Path("catalog")  # PDF 檔案儲存資料夾
-# POPPLER_PATH = r".\poppler-25.11.0\Library\bin"  # Poppler 路徑
+# Poppler 路徑 - 自動檢測環境
+POPPLER_PATH = r".\poppler-25.11.0\Library\bin" if os.name == 'nt' and Path("poppler-25.11.0").exists() else None
 MODEL_NAME = "clip-vit-b-32"  # 模型名稱
 INDEX_DIR = Path("metadata-files") / MODEL_NAME  # 索引檔案目錄
 PATHS_FILE = INDEX_DIR / "paths.npz"  # 圖像路徑檔案
