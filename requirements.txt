@@ -8,3 +8,4 @@ faiss-cpu
 PyPDF2
 PyMuPDF
 pdf2image
+requests

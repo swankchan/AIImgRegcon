@@ -20,12 +20,14 @@ repo-backup.bundle
 
 # Large image backup folder (already present in this workspace)
 images backup/
+catalog backup/
 
 # Data / caches
 *.npz
 *.npy
 *.idx
 *.pkl
+*.pdf
 
 # Streamlit cache
 .streamlit/

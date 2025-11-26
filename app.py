@@ -1,4 +1,4 @@
-# 執行指令: streamlit run app.py
+# Run command: streamlit run app.py
 import os
 from pathlib import Path
 from time import perf_counter
@@ -6,46 +6,99 @@ from typing import Callable, Iterable, List, Sequence, Tuple, Dict, Optional
 import json
 from io import BytesIO
 
-import faiss  # FAISS 向量搜尋庫
+import faiss  # FAISS vector search library
 import numpy as np
-import open_clip  # type: ignore  # CLIP 模型
-import streamlit as st  # 網頁應用框架
-import torch  # PyTorch 深度學習框架
-from PIL import Image  # 圖像處理
+import open_clip  # type: ignore  # CLIP model
+import streamlit as st  # Web application framework
+import torch  # PyTorch deep learning framework
+from PIL import Image  # Image processing
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
-# PDF 處理相關
+# PDF processing utilities
 try:
-    import PyPDF2
-    import fitz  # PyMuPDF
-    from pdf2image import convert_from_bytes
-    PDF_SUPPORT = True
+    from pdf_utils import (
+        save_pdf_to_catalog,
+        extract_images_from_pdf,
+        extract_text_from_pdf,
+        extract_keywords_from_text,
+        analyze_pdf_with_ai,
+        generate_smart_caption,
+        PDF_SUPPORT
+    )
 except ImportError:
     PDF_SUPPORT = False
 
-# ===== 設定常數 =====
-IMAGE_FOLDERS = [Path("images")]  # 圖像儲存資料夾
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}  # 支援的圖像格式
-PDF_CATALOG_FOLDER = Path("catalog")  # PDF 檔案儲存資料夾
-# Poppler 路徑 - 自動檢測環境
-POPPLER_PATH = r".\poppler-25.11.0\Library\bin" if os.name == 'nt' and Path("poppler-25.11.0").exists() else None
-MODEL_NAME = "clip-vit-b-32"  # 模型名稱
-INDEX_DIR = Path("metadata-files") / MODEL_NAME  # 索引檔案目錄
-PATHS_FILE = INDEX_DIR / "paths.npz"  # 圖像路徑檔案
-FEATURES_FILE = INDEX_DIR / "features.npy"  # 特徵向量檔案
-FAISS_INDEX_FILE = INDEX_DIR / "image_features.index"  # FAISS 索引檔案
-METADATA_FILE = INDEX_DIR / "metadata.json"  # 中繼資料檔案 (標題、關鍵字)
-TOP_K = 8  # 搜尋結果數量
-BATCH_SIZE = 8  # 批次處理大小
-CLIP_MODEL = "ViT-B-32"  # CLIP 模型架構
-CLIP_PRETRAINED = "openai"  # CLIP 預訓練版本
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # GPU 或 CPU
-EMBED_DIM = 512  # 嵌入維度
+# ===== Load Configuration =====
+# Default configuration values
+DEFAULT_CONFIG = {
+    "folders": {
+        "images": "images",
+        "pdf_catalog": "catalog",
+        "metadata": "metadata-files"
+    },
+    "image_formats": [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"],
+    "model": {
+        "name": "clip-vit-b-32",
+        "architecture": "ViT-B-32",
+        "pretrained": "openai",
+        "embedding_dim": 512
+    },
+    "search": {
+        "top_k": 8,
+        "batch_size": 8
+    },
+    "pdf": {
+        "max_keywords": 5,
+        "jpeg_quality": 85,
+        "ai_analysis": {
+            "enabled": False,
+            "model": "gemma3:1b",
+            "ollama_url": "http://localhost:11434",
+            "fields": ["Project Name", "Location", "Client", "Contractor", "Date of Completion", "Role", "Description"],
+            "caption_template": "{project_name}"
+        }
+    }
+}
 
-# ===== 載入模型相關函數 =====
+def load_config() -> dict:
+    """Load configuration from config.json file"""
+    config_path = Path("config.json")
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # Return default config if file doesn't exist
+    return DEFAULT_CONFIG
+
+CONFIG = load_config()
+
+# ===== Configuration Constants =====
+IMAGE_FOLDERS = [Path(CONFIG["folders"]["images"])]  # Image storage folder
+IMAGE_EXTS = set(CONFIG["image_formats"])  # Supported image formats
+PDF_CATALOG_FOLDER = Path(CONFIG["folders"]["pdf_catalog"])  # PDF file storage folder
+MODEL_NAME = CONFIG["model"]["name"]  # Model name
+INDEX_DIR = Path(CONFIG["folders"]["metadata"]) / MODEL_NAME  # Index file directory
+PATHS_FILE = INDEX_DIR / "paths.npz"  # Image paths file
+FEATURES_FILE = INDEX_DIR / "features.npy"  # Feature vectors file
+FAISS_INDEX_FILE = INDEX_DIR / "image_features.index"  # FAISS index file
+METADATA_FILE = INDEX_DIR / "metadata.json"  # Metadata file (captions, keywords)
+TOP_K = CONFIG["search"]["top_k"]  # Number of search results
+BATCH_SIZE = CONFIG["search"]["batch_size"]  # Batch processing size
+CLIP_MODEL = CONFIG["model"]["architecture"]  # CLIP model architecture
+CLIP_PRETRAINED = CONFIG["model"]["pretrained"]  # CLIP pretrained version
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # GPU or CPU
+EMBED_DIM = CONFIG["model"]["embedding_dim"]  # Embedding dimension
+PDF_MAX_KEYWORDS = CONFIG["pdf"]["max_keywords"]  # Max keywords to extract from PDF
+PDF_JPEG_QUALITY = CONFIG["pdf"]["jpeg_quality"]  # JPEG quality for PDF image extraction
+PDF_AI_ENABLED = CONFIG["pdf"].get("ai_analysis", {}).get("enabled", False)  # Enable AI analysis
+PDF_AI_MODEL = CONFIG["pdf"].get("ai_analysis", {}).get("model", "llama3.2")  # AI model
+PDF_AI_OLLAMA_URL = CONFIG["pdf"].get("ai_analysis", {}).get("ollama_url", "http://localhost:11434")  # Ollama URL
+PDF_AI_FIELDS = CONFIG["pdf"].get("ai_analysis", {}).get("fields", ["Project Name", "Location", "Client", "Role"])  # AI extraction fields
+PDF_AI_CAPTION_TEMPLATE = CONFIG["pdf"].get("ai_analysis", {}).get("caption_template", "{project_name}")  # Caption template
+
+# ===== Model Loading Functions =====
 @st.cache_resource(show_spinner=False)
 def load_clip_components():
-    """載入 CLIP 模型、前處理器和分詞器（使用快取加速）"""
+    """Load CLIP model, preprocessor and tokenizer (cached for speed)"""
     model, preprocess, _ = open_clip.create_model_and_transforms(CLIP_MODEL, pretrained=CLIP_PRETRAINED)
     tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
     model = model.to(DEVICE)
@@ -54,17 +107,17 @@ def load_clip_components():
 
 
 def ensure_index_dir():
-    """確保索引目錄存在"""
+    """Ensure index directory exists"""
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def list_available_directories(base: Path = Path(".")) -> List[Path]:
-    """列出可用的目錄"""
+    """List available directories"""
     return sorted([p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")])
 
 
 def list_image_paths(folders: Iterable[Path] | None = None) -> List[Path]:
-    """遞迴搜尋指定資料夾中的所有圖像檔案"""
+    """Recursively search for all image files in specified folders"""
     paths = []
     search_folders = list(folders) if folders is not None else IMAGE_FOLDERS
     for folder in search_folders:
@@ -77,7 +130,7 @@ def list_image_paths(folders: Iterable[Path] | None = None) -> List[Path]:
 
 
 def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
-    """將向量正規化為單位向量（用於相似度搜尋）"""
+    """Normalize vectors to unit vectors (for similarity search)"""
     if vectors.size == 0:
         return vectors
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -85,9 +138,9 @@ def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
     return vectors / norms
 
 
-# ===== 中繼資料相關函數 =====
+# ===== Metadata Related Functions =====
 def load_metadata_arrays() -> Tuple[List[str], np.ndarray]:
-    """載入索引中的圖像路徑和特徵向量"""
+    """Load image paths and feature vectors from index"""
     if not PATHS_FILE.exists() or not FEATURES_FILE.exists():
         return [], np.empty((0, EMBED_DIM), dtype=np.float32)
     paths = np.load(PATHS_FILE, allow_pickle=True)["paths"].tolist()
@@ -96,20 +149,20 @@ def load_metadata_arrays() -> Tuple[List[str], np.ndarray]:
 
 
 def normalize_path_key(path_str: str) -> str:
-    """正規化路徑以支援絕對路徑和相對路徑的互操作性"""
+    """Normalize path to support interoperability between absolute and relative paths"""
     p = Path(path_str).resolve()
     return str(p)
 
 
 def load_all_metadata() -> Dict[str, Dict]:
-    """載入所有圖像的標題和關鍵字中繼資料"""
+    """Load all image caption and keyword metadata"""
     if not METADATA_FILE.exists():
         return {}
     try:
         with open(METADATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, dict):
-                # 將所有相對路徑轉換為絕對路徑以確保一致性
+                # Convert all relative paths to absolute paths for consistency
                 normalized = {}
                 for key, val in data.items():
                     norm_key = normalize_path_key(key)
@@ -121,16 +174,16 @@ def load_all_metadata() -> Dict[str, Dict]:
 
 
 def save_metadata_file(metadata: Dict[str, Dict]):
-    """儲存中繼資料到 JSON 檔案（使用相對路徑以增進可移植性）"""
+    """Save metadata to JSON file (using relative paths for portability)"""
     ensure_index_dir()
     try:
-        # 將絕對路徑轉換為相對路徑以提高可移植性
+        # Convert absolute paths to relative paths for portability
         relative_meta: Dict[str, Dict] = {}
         for abs_path, data in metadata.items():
             try:
                 rel_path = str(Path(abs_path).relative_to(Path.cwd()))
             except ValueError:
-                # 若路徑無法相對化，則使用原始路徑
+                # If path cannot be made relative, use original path
                 rel_path = abs_path
             relative_meta[rel_path] = data
         
@@ -141,10 +194,10 @@ def save_metadata_file(metadata: Dict[str, Dict]):
 
 
 def persist_index(paths: Sequence[str], features: np.ndarray, metadata: Optional[Dict[str, Dict]] = None):
-    """保存索引檔案、特徵向量和中繼資料"""
+    """Save index files, feature vectors and metadata"""
     ensure_index_dir()
     if not paths or features.size == 0:
-        # 清空所有索引檔案
+        # Clear all index files
         for file in [PATHS_FILE, FEATURES_FILE, FAISS_INDEX_FILE]:
             if file.exists():
                 file.unlink()
@@ -162,7 +215,7 @@ def persist_index(paths: Sequence[str], features: np.ndarray, metadata: Optional
     st.session_state["indexed_paths"] = list(paths)
     st.session_state["faiss_index"] = index
 
-    # 保存中繼資料（若提供則使用，否則載入既有資料並過濾）
+    # Save metadata (use provided if available, otherwise load existing and filter)
     if metadata is None:
         existing_meta = load_all_metadata()
     else:
@@ -172,14 +225,14 @@ def persist_index(paths: Sequence[str], features: np.ndarray, metadata: Optional
         if p in existing_meta and isinstance(existing_meta[p], dict):
             filtered_meta[p] = existing_meta[p]
         else:
-            # 為新圖像建立預設中繼資料項目
+            # Create default metadata entry for new images
             filtered_meta[p] = {"caption": "", "keywords": []}
     save_metadata_file(filtered_meta)
     st.session_state["metadata"] = filtered_meta
 
 
 def load_index_into_session():
-    """從檔案載入索引到 session state"""
+    """Load index from files into session state"""
     if "faiss_index" in st.session_state and "indexed_paths" in st.session_state:
         return
     if not FAISS_INDEX_FILE.exists() or not PATHS_FILE.exists():
@@ -194,9 +247,9 @@ def load_index_into_session():
     st.session_state["faiss_index"] = index
     st.session_state["metadata"] = load_all_metadata()
 
-# ===== 嵌入和索引相關函數 =====
+# ===== Embedding and Indexing Functions =====
 def encode_image_batch(tensors: List[torch.Tensor], model: torch.nn.Module) -> np.ndarray:
-    """將一批圖像編碼為特徵向量"""
+    """Encode a batch of images into feature vectors"""
     batch = torch.stack(tensors).to(DEVICE)
     with torch.no_grad():
         features = model.encode_image(batch)
@@ -207,7 +260,7 @@ def extract_image_index(
     paths: Sequence[Path],
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> Tuple[List[Path], np.ndarray]:
-    """提取圖像的特徵向量並建立索引"""
+    """Extract feature vectors from images and build index"""
     model, preprocess, _ = load_clip_components()
     valid_paths: List[Path] = []
     tensors: List[torch.Tensor] = []
@@ -249,7 +302,7 @@ def sync_directories(
     dir_paths: Sequence[Path],
     progress_reporter: Callable[[int, int], None] | None = None,
 ):
-    """同步選定資料夾中的圖像到索引"""
+    """Sync images from selected folders to index"""
     image_paths = list_image_paths(dir_paths)
     if not image_paths:
         st.warning("No images found in selected folders; index unchanged.")
@@ -276,7 +329,7 @@ def sync_directories(
         retained_paths.extend(str(p) for p in new_paths)
         retained_features.extend(list(new_features))
         new_count = len(new_paths)
-        # 為新索引的圖像新增預設中繼資料項目
+        # Add default metadata entries for newly indexed images
         for p in new_paths:
             pstr = str(p)
             if pstr not in existing_meta:
@@ -294,7 +347,7 @@ def sync_directories(
 
 
 def remove_images_from_index(paths_to_remove: Sequence[str], delete_files: bool = False):
-    """從索引中移除圖像"""
+    """Remove images from index"""
     if not paths_to_remove:
         return
     existing_paths, existing_features = load_metadata_arrays()
@@ -308,7 +361,7 @@ def remove_images_from_index(paths_to_remove: Sequence[str], delete_files: bool 
         new_features = existing_features[keep_indices]
     else:
         new_features = np.empty((0, EMBED_DIM), dtype=np.float32)
-    # 過濾保留的路徑的中繼資料
+    # Filter metadata for retained paths
     existing_meta = load_all_metadata()
     new_meta: Dict[str, Dict] = {}
     for p in new_paths:
@@ -323,9 +376,9 @@ def remove_images_from_index(paths_to_remove: Sequence[str], delete_files: bool 
                 st.warning(f"Failed to delete file {path}: {exc}")
     st.success(f"Removed {len(paths_to_remove)} images from index.")
 
-# ===== 搜尋相關函數 =====
+# ===== Search Related Functions =====
 def embed_uploaded_image(uploaded_file) -> np.ndarray:
-    """編碼上傳的圖像為向量"""
+    """Encode uploaded image into vector"""
     model, preprocess, _ = load_clip_components()
     image = Image.open(uploaded_file).convert("RGB")
     tensor = preprocess(image).unsqueeze(0).to(DEVICE)
@@ -337,7 +390,7 @@ def embed_uploaded_image(uploaded_file) -> np.ndarray:
 
 
 def embed_text(query: str) -> np.ndarray:
-    """編碼文本搜尋查詢為向量"""
+    """Encode text search query into vector"""
     model, _, tokenizer = load_clip_components()
     tokens = tokenizer([query])
     with torch.no_grad():
@@ -348,7 +401,7 @@ def embed_text(query: str) -> np.ndarray:
 
 
 def search_similar(vector: np.ndarray, top_k: int = TOP_K) -> List[Tuple[str, float]]:
-    """使用 FAISS 搜尋相似圖像"""
+    """Search for similar images using FAISS"""
     index = st.session_state.get("faiss_index")
     paths = st.session_state.get("indexed_paths", [])
     if index is None or not paths:
@@ -364,7 +417,7 @@ def search_similar(vector: np.ndarray, top_k: int = TOP_K) -> List[Tuple[str, fl
 
 
 def record_query_metrics(mode: str, duration: float):
-    """記錄搜尋性能指標"""
+    """Record search performance metrics"""
     comparisons = len(st.session_state.get("indexed_paths", []))
     throughput = comparisons / duration if duration > 0 else float("inf")
     st.session_state["last_metrics"] = {
@@ -376,16 +429,16 @@ def record_query_metrics(mode: str, duration: float):
 
 
 def render_results(results: List[Tuple[str, float]]):
-    """顯示搜尋結果"""
+    """Display search results"""
     if not results:
-        st.info("尚無結果。建立索引或調整查詢。")
+        st.info("No results yet. Build index or adjust query.")
         return
     cols = st.columns(4)
     for idx, (img_path, score) in enumerate(results):
         col = cols[idx % len(cols)]
         with col:
             meta = st.session_state.get("metadata", {}).get(img_path, {})
-            caption_parts = [f"{Path(img_path).name}", f"相似度 {score:.2f}"]
+            caption_parts = [f"{Path(img_path).name}", f"Similarity {score:.2f}"]
             if isinstance(meta, dict):
                 caption = meta.get("caption", "")
                 keywords = meta.get("keywords", [])
@@ -393,7 +446,7 @@ def render_results(results: List[Tuple[str, float]]):
                     caption_parts.insert(1, f"{caption}")
                 if keywords:
                     kw = ", ".join(keywords)
-                    caption_parts.append(f"關鍵字: {kw}")
+                    caption_parts.append(f"Keywords: {kw}")
             full_caption = " · ".join(caption_parts)
             st.image(
                 img_path,
@@ -403,7 +456,7 @@ def render_results(results: List[Tuple[str, float]]):
 
 
 def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
-    """保存上傳的圖像到圖像資料夾"""
+    """Save uploaded images to image folder"""
     saved: List[Path] = []
     if not files:
         return saved
@@ -412,7 +465,7 @@ def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
     for uploaded in files:
         suffix = Path(uploaded.name).suffix.lower()
         if suffix not in IMAGE_EXTS:
-            st.warning(f"{uploaded.name} 不是支援的圖像格式；已跳過。")
+            st.warning(f"{uploaded.name} is not a supported image format; skipped.")
             continue
         stem = Path(uploaded.name).stem
         dest = target_dir / f"{stem}{suffix}"
@@ -426,189 +479,11 @@ def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
     return saved
 
 
-# ===== PDF 處理函數 =====
-def save_pdf_to_catalog(pdf_file: UploadedFile, catalog_folder: Path) -> Path:
-    """
-    將上傳的 PDF 保存到 catalog 資料夾
-    
-    參數:
-        pdf_file: 上傳的 PDF 檔案
-        catalog_folder: 目標資料夾
-    
-    返回:
-        保存的 PDF 路徑
-    """
-    catalog_folder.mkdir(parents=True, exist_ok=True)
-    
-    pdf_filename = Path(pdf_file.name).name
-    dest_path = catalog_folder / pdf_filename
-    
-    # 避免重複檔名
-    counter = 1
-    stem = Path(pdf_file.name).stem
-    while dest_path.exists():
-        dest_path = catalog_folder / f"{stem}_{counter}.pdf"
-        counter += 1
-    
-    # 保存 PDF
-    with open(dest_path, "wb") as f:
-        f.write(pdf_file.read())
-    
-    return dest_path
+# ===== PDF Processing Functions =====
+# (Moved to pdf_utils.py for better organization)
 
 
-def extract_images_from_pdf(pdf_file: UploadedFile, output_folder: Path) -> Tuple[List[Path], str]:
-    """
-    從 PDF 擷取所有內嵌圖片並存檔
-    
-    參數:
-        pdf_file: 上傳的 PDF 檔案
-        output_folder: 圖片輸出資料夾
-    
-    返回:
-        (圖片路徑列表, PDF 檔案名稱)
-    """
-    if not PDF_SUPPORT:
-        raise ImportError("PDF support not available. Install PyMuPDF (fitz).")
-    
-    pdf_filename = Path(pdf_file.name).stem  # PDF 檔名（無副檔名）
-    pdf_bytes = pdf_file.read()
-    
-    # 使用 PyMuPDF 開啟 PDF
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    image_paths: List[Path] = []
-    
-    output_folder.mkdir(parents=True, exist_ok=True)
-    
-    img_counter = 1
-    
-    # 遍歷每一頁
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        
-        # 獲取頁面中的所有圖片
-        image_list = page.get_images(full=True)
-        
-        for img_index, img_info in enumerate(image_list):
-            xref = img_info[0]  # 圖片的 xref 編號
-            
-            try:
-                # 提取圖片
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                image_ext = base_image["ext"]  # 圖片格式（png, jpeg 等）
-                
-                # 轉換為 PIL Image
-                img = Image.open(BytesIO(image_bytes))
-                
-                # 圖片檔名格式: pdfname_img1.jpg, pdfname_img2.jpg ...
-                img_filename = f"{pdf_filename}_img{img_counter}.jpg"
-                img_path = output_folder / img_filename
-                
-                # 避免重複檔名
-                counter = 1
-                while img_path.exists():
-                    img_filename = f"{pdf_filename}_img{img_counter}_{counter}.jpg"
-                    img_path = output_folder / img_filename
-                    counter += 1
-                
-                # 保存為 JPEG
-                if img.mode in ("RGBA", "LA", "P"):
-                    # 轉換透明背景為白色
-                    background = Image.new("RGB", img.size, (255, 255, 255))
-                    if img.mode == "P":
-                        img = img.convert("RGBA")
-                    background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
-                    img = background
-                elif img.mode != "RGB":
-                    img = img.convert("RGB")
-                
-                img.save(img_path, "JPEG", quality=85)
-                image_paths.append(img_path)
-                img_counter += 1
-                
-            except Exception as e:
-                st.warning(f"無法提取圖片 (page {page_num + 1}, img {img_index + 1}): {str(e)}")
-                continue
-    
-    doc.close()
-    
-    return image_paths, pdf_filename
-
-
-def extract_text_from_pdf(pdf_file: UploadedFile) -> str:
-    """
-    從 PDF 擷取所有文字
-    
-    參數:
-        pdf_file: 上傳的 PDF 檔案
-    
-    返回:
-        擷取的文字內容
-    """
-    if not PDF_SUPPORT:
-        raise ImportError("PDF support not available. Install PyPDF2.")
-    
-    pdf_bytes = pdf_file.read()
-    pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-    
-    all_text = []
-    for page in pdf_reader.pages:
-        text = page.extract_text()
-        if text:
-            all_text.append(text)
-    
-    return "\n\n".join(all_text)
-
-
-def extract_keywords_from_text(text: str, max_keywords: int = 5) -> List[str]:
-    """
-    從文字中提取關鍵字
-    
-    參數:
-        text: 文字內容
-        max_keywords: 最多返回多少個關鍵字
-    
-    返回:
-        關鍵字列表
-    """
-    import re
-    from collections import Counter
-    
-    # 常見停用詞（中英文）
-    stop_words = {
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from",
-        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
-        "will", "would", "could", "should", "may", "might", "can", "this", "that", "these", "those",
-        "i", "you", "he", "she", "it", "we", "they", "them", "their", "its", "our", "your",
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "個", "上", "也", "說",
-        "出", "到", "時", "要", "以", "用", "著", "能", "之", "會", "後", "然", "沒", "很", "好", "來",
-        "page", "pages", "document", "file", "pdf", "image", "fig", "figure"
-    }
-    
-    # 移除特殊字符，保留字母、數字、中文
-    text = text.lower()
-    words = re.findall(r'\b\w+\b', text)
-    
-    # 過濾停用詞和太短的詞
-    filtered_words = [
-        word for word in words 
-        if len(word) >= 3 and word not in stop_words
-    ]
-    
-    # 統計詞頻
-    word_counts = Counter(filtered_words)
-    
-    # 取最常見的關鍵字
-    top_keywords = [word for word, count in word_counts.most_common(max_keywords * 2)]
-    
-    # 過濾純數字
-    keywords = [kw for kw in top_keywords if not kw.isdigit()][:max_keywords]
-    
-    return keywords
-
-
-# ===== Streamlit UI 應用程式 =====
+# ===== Streamlit UI Application =====
 st.title("AI Image Similarity Search")
 load_index_into_session()
 
@@ -618,12 +493,12 @@ view_mode = st.sidebar.radio(
     index=0,
 )
 
-# 切換視圖時重置臨時 UI 狀態
+# Reset temporary UI state when switching views
 if "last_view_mode" not in st.session_state:
     st.session_state["last_view_mode"] = view_mode
 elif st.session_state["last_view_mode"] != view_mode:
     st.session_state["last_view_mode"] = view_mode
-    # 清除臨時狀態變數
+    # Clear temporary state variables
     for key in ["removal_selection", "last_metrics"]:
         if key in st.session_state:
             del st.session_state[key]
@@ -632,7 +507,7 @@ elif st.session_state["last_view_mode"] != view_mode:
 if view_mode == "Indexing":
     st.subheader("Index management")
     
-    # ===== PDF 上傳與圖片擷取 =====
+    # ===== PDF Upload and Image Extraction =====
     if PDF_SUPPORT:
         st.markdown("### 📄 Extract Images from PDF")
         pdf_files = st.file_uploader(
@@ -653,27 +528,56 @@ if view_mode == "Indexing":
                     try:
                         st.info(f"Processing: {pdf_file.name}")
                         
-                        # 保存 PDF 到 catalog 資料夾
+                        # Save PDF to catalog folder
                         pdf_path = save_pdf_to_catalog(pdf_file, PDF_CATALOG_FOLDER)
                         st.success(f"✓ Saved PDF to: {pdf_path}")
                         
-                        # 擷取圖片
-                        pdf_file.seek(0)  # 重置檔案指針
-                        image_paths, pdf_filename = extract_images_from_pdf(pdf_file, output_folder)
+                        # Extract images
+                        pdf_file.seek(0)  # Reset file pointer
+                        image_paths, pdf_filename = extract_images_from_pdf(
+                            pdf_file, output_folder, jpeg_quality=PDF_JPEG_QUALITY
+                        )
                         
-                        # 擷取文字
-                        pdf_file.seek(0)  # 重置檔案指針
+                        # Extract text
+                        pdf_file.seek(0)  # Reset file pointer
                         extracted_text = extract_text_from_pdf(pdf_file)
                         
-                        # 提取關鍵字
-                        suggested_keywords = extract_keywords_from_text(extracted_text, max_keywords=5)
+                        # AI analysis (if enabled) - do this FIRST to get structured info
+                        ai_info = None
+                        smart_caption = None
+                        if PDF_AI_ENABLED and extracted_text.strip():
+                            try:
+                                with st.spinner("🤖 Analyzing with AI... (10-30 seconds)"):
+                                    ai_info = analyze_pdf_with_ai(
+                                        extracted_text,
+                                        custom_fields=PDF_AI_FIELDS,
+                                        ollama_url=PDF_AI_OLLAMA_URL,
+                                        model=PDF_AI_MODEL
+                                    )
+                                    
+                                    if "error" not in ai_info:
+                                        smart_caption = generate_smart_caption(ai_info, template=PDF_AI_CAPTION_TEMPLATE)
+                                        st.success(f"✓ AI Analysis: {smart_caption}")
+                                    else:
+                                        st.warning(f"⚠️ {ai_info.get('error', 'Unknown error')}")
+                            except Exception as e:
+                                st.warning(f"AI analysis failed: {str(e)}")
+                        
+                        # Extract keywords (now with AI info to prioritize structured data)
+                        suggested_keywords = extract_keywords_from_text(
+                            extracted_text, 
+                            max_keywords=PDF_MAX_KEYWORDS,
+                            ai_info=ai_info
+                        )
                         
                         all_extracted_images.extend(image_paths)
                         all_pdf_data.append({
                             "image_paths": image_paths,
                             "pdf_filename": pdf_filename,
                             "extracted_text": extracted_text,
-                            "suggested_keywords": suggested_keywords
+                            "suggested_keywords": suggested_keywords,
+                            "ai_info": ai_info,
+                            "smart_caption": smart_caption
                         })
                         
                         st.success(f"✓ Extracted {len(image_paths)} images from {pdf_file.name}")
@@ -686,19 +590,38 @@ if view_mode == "Indexing":
                     st.session_state["pdf_keywords_input"] = {}
                     st.success(f"Total: {len(all_extracted_images)} images extracted. Scroll down to add keywords.")
         
-        # ===== Keywords 揀選介面 =====
+        # ===== Keywords Selection Interface =====
         if "pdf_extracted_data" in st.session_state:
             st.markdown("### 🏷️ Add Keywords for Extracted Images")
-            st.info("Review extracted text and enter keywords for each image. The PDF filename will be used as the caption.")
+            
+            # Show AI analysis toggle if available
+            if PDF_AI_ENABLED:
+                st.info("✨ AI Analysis is enabled. Extracted information will be shown below.")
+            else:
+                st.info("Review extracted text and enter keywords for each image. The PDF filename will be used as the caption.")
             
             for pdf_data in st.session_state["pdf_extracted_data"]:
                 pdf_filename = pdf_data["pdf_filename"]
                 image_paths = pdf_data["image_paths"]
                 extracted_text = pdf_data["extracted_text"]
+                ai_info = pdf_data.get("ai_info")
+                smart_caption = pdf_data.get("smart_caption")
                 
                 st.markdown(f"#### PDF: `{pdf_filename}.pdf`")
                 
-                # 顯示擷取的文字（讓用戶參考）
+                # Display AI analysis results if available
+                if ai_info and "error" not in ai_info:
+                    with st.expander("🤖 AI Extracted Information", expanded=True):
+                        cols_ai = st.columns(2)
+                        for i, (field, value) in enumerate(ai_info.items()):
+                            col = cols_ai[i % 2]
+                            with col:
+                                st.markdown(f"**{field.replace('_', ' ').title()}:** {value}")
+                        
+                        if smart_caption:
+                            st.markdown(f"**📝 Suggested Caption:** `{smart_caption}`")
+                
+                # Display extracted text (for user reference)
                 with st.expander("📝 Extracted text from PDF (for reference)", expanded=False):
                     st.text_area(
                         "Text content",
@@ -708,10 +631,13 @@ if view_mode == "Indexing":
                         key=f"text_preview_{pdf_filename}"
                     )
                 
-                # 為每張圖片輸入 keywords
+                # Enter keywords for each image
                 cols = st.columns(2)
                 suggested_keywords = pdf_data.get("suggested_keywords", [])
                 default_keywords_str = ", ".join(suggested_keywords)
+                
+                # Use smart caption if available, otherwise use PDF filename
+                default_caption = smart_caption if smart_caption else pdf_filename
                 
                 for idx, img_path in enumerate(image_paths):
                     col = cols[idx % 2]
@@ -721,6 +647,18 @@ if view_mode == "Indexing":
                         except:
                             st.warning(f"Cannot preview: {img_path.name}")
                         
+                        # Caption input (with AI-suggested caption if available)
+                        caption_key = f"caption_{pdf_filename}_{idx}"
+                        caption_input = st.text_input(
+                            f"Caption for {img_path.name}",
+                            key=caption_key,
+                            value=default_caption,
+                            help="Caption for this image (AI-suggested if enabled)"
+                        )
+                        
+                        st.session_state["pdf_keywords_input"][f"{str(img_path)}_caption"] = caption_input
+                        
+                        # Keywords input
                         keywords_key = f"keywords_{pdf_filename}_{idx}"
                         keywords_input = st.text_input(
                             f"Keywords for {img_path.name}",
@@ -733,7 +671,7 @@ if view_mode == "Indexing":
                 
                 st.divider()
             
-            # 保存所有 metadata
+            # Save all metadata
             if st.button("💾 Save all metadata and finish", type="primary"):
                 metadata = load_all_metadata()
                 
@@ -746,19 +684,22 @@ if view_mode == "Indexing":
                         keywords_input = st.session_state["pdf_keywords_input"].get(img_path_str, "")
                         keywords_list = [k.strip() for k in keywords_input.split(",") if k.strip()]
                         
-                        # 正規化路徑
+                        # Get caption (AI-suggested or PDF filename)
+                        caption = st.session_state["pdf_keywords_input"].get(f"{img_path_str}_caption", pdf_filename)
+                        
+                        # Normalize path
                         norm_path = normalize_path_key(img_path_str)
                         
-                        # caption 使用 PDF 檔名
+                        # Use AI-suggested caption or PDF filename
                         metadata[norm_path] = {
-                            "caption": f"{pdf_filename}.pdf",
+                            "caption": caption,
                             "keywords": keywords_list
                         }
                 
                 save_metadata_file(metadata)
                 st.session_state["metadata"] = metadata
                 
-                # 清理臨時資料
+                # Clean up temporary data
                 del st.session_state["pdf_extracted_data"]
                 del st.session_state["pdf_keywords_input"]
                 
@@ -769,7 +710,7 @@ if view_mode == "Indexing":
     
     st.divider()
     
-    # ===== 原有的圖片上傳功能 =====
+    # ===== Original Image Upload Feature =====
     upload_candidates = st.file_uploader(
         "Add new images to the gallery (multiple files allowed)",
         type=list({ext.replace(".", "") for ext in IMAGE_EXTS}),
@@ -867,7 +808,7 @@ elif view_mode == "Metadata":
         st.info("No indexed images to edit. Run a sync first in Indexing.")
 
 else:
-    # 搜尋模式（預設）
+    # Search mode (default)
     st.divider()
     
     if not st.session_state.get("indexed_paths"):
