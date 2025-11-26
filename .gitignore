@@ -21,6 +21,7 @@ repo-backup.bundle
 # Large image backup folder (already present in this workspace)
 images backup/
 catalog backup/
+metadata-files/
 
 # Data / caches
 *.npz
