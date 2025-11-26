@@ -137,7 +137,7 @@ def save_metadata_file(metadata: Dict[str, Dict]):
         with open(METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(relative_meta, f, ensure_ascii=False, indent=2)
     except Exception as exc:
-        st.warning(f"儲存中繼資料失敗: {exc}")
+        st.warning(f"Failed to save metadata: {exc}")
 
 
 def persist_index(paths: Sequence[str], features: np.ndarray, metadata: Optional[Dict[str, Dict]] = None):
@@ -226,7 +226,7 @@ def extract_image_index(
         try:
             image = Image.open(path).convert("RGB")
         except Exception as exc:
-            st.warning(f"處理圖像失敗 {path.name}: {exc}")
+            st.warning(f"Failed to process image {path.name}: {exc}")
             continue
         tensors.append(preprocess(image))
         valid_paths.append(path)
@@ -252,7 +252,7 @@ def sync_directories(
     """同步選定資料夾中的圖像到索引"""
     image_paths = list_image_paths(dir_paths)
     if not image_paths:
-        st.warning("選定資料夾中沒有圖像；索引未更改。")
+        st.warning("No images found in selected folders; index unchanged.")
         return
     existing_paths, existing_features = load_metadata_arrays()
     existing_map = {path: existing_features[idx] for idx, path in enumerate(existing_paths)}
@@ -288,8 +288,8 @@ def sync_directories(
     persist_index(retained_paths, combined_features, metadata=existing_meta)
     removed_count = max(len(existing_paths) - len(retained_paths), 0)
     st.success(
-        f"同步完成: 保留 {len(retained_paths)} 個檔案, "
-        f"新增 {new_count} 個, 移除 {removed_count} 個。"
+        f"Sync complete: kept {len(retained_paths)} files, "
+        f"added {new_count}, removed {removed_count}."
     )
 
 
@@ -299,7 +299,7 @@ def remove_images_from_index(paths_to_remove: Sequence[str], delete_files: bool 
         return
     existing_paths, existing_features = load_metadata_arrays()
     if not existing_paths:
-        st.info("索引中沒有圖像可移除。")
+        st.info("No images in index to remove.")
         return
     remove_set = set(paths_to_remove)
     keep_indices = [idx for idx, path in enumerate(existing_paths) if path not in remove_set]
@@ -320,8 +320,8 @@ def remove_images_from_index(paths_to_remove: Sequence[str], delete_files: bool 
             try:
                 Path(path).unlink(missing_ok=True)
             except Exception as exc:
-                st.warning(f"刪除檔案失敗 {path}: {exc}")
-    st.success(f"從索引中移除 {len(paths_to_remove)} 個圖像。")
+                st.warning(f"Failed to delete file {path}: {exc}")
+    st.success(f"Removed {len(paths_to_remove)} images from index.")
 
 # ===== 搜尋相關函數 =====
 def embed_uploaded_image(uploaded_file) -> np.ndarray:
