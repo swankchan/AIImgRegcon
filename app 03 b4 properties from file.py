@@ -5,7 +5,6 @@ from time import perf_counter
 from typing import Callable, Iterable, List, Sequence, Tuple, Dict, Optional
 import json
 from io import BytesIO
-from datetime import datetime, timezone, timedelta
 
 import faiss  # FAISS vector search library
 import numpy as np
@@ -15,88 +14,31 @@ import torch  # PyTorch deep learning framework
 from PIL import Image  # Image processing
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
-################################################
-# Call pdf_utils.py - PDF processing utilities #
-################################################
+# PDF processing related
 try:
-    from pdf_utils import (
-        save_pdf_to_catalog,
-        extract_images_from_pdf,
-        extract_text_from_pdf,
-        extract_keywords_from_text,
-        analyze_pdf_with_ai,
-        generate_smart_caption,
-        PDF_SUPPORT
-    )
+    import PyPDF2
+    import fitz  # PyMuPDF
+    from pdf2image import convert_from_bytes
+    PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
 
-# ===== Load Configuration =====
-# Default configuration values
-DEFAULT_CONFIG = {
-    "folders": {
-        "images": "images",
-        "pdf_catalog": "catalog",
-        "metadata": "metadata-files"
-    },
-    "image_formats": [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"],
-    "model": {
-        "name": "clip-vit-l-14",
-        "architecture": "ViT-L-14",
-        "pretrained": "openai",
-        "embedding_dim": 768
-    },
-    "search": {
-        "top_k": 8,
-        "batch_size": 8
-    },
-    "pdf": {
-        "max_keywords": 5,
-        "jpeg_quality": 85,
-        "ai_analysis": {
-            "enabled": False,
-            "model": "gemma3:1b",
-            "ollama_url": "http://localhost:11434",
-            "fields": ["Project Name", "Location", "Client", "Contractor", "Date of Completion", "Role", "Description"],
-            "caption_template": "{project_name}"
-        }
-    }
-}
-
-def load_config() -> dict:
-    """Load configuration from config.json file"""
-    config_path = Path("config.json")
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    # Return default config if file doesn't exist
-    return DEFAULT_CONFIG
-
-CONFIG = load_config()
-
 # ===== Configuration Constants =====
-IMAGE_FOLDERS = [Path(CONFIG["folders"]["images"])]  # Image storage folder
-IMAGE_EXTS = set(CONFIG["image_formats"])  # Supported image formats
-PDF_CATALOG_FOLDER = Path(CONFIG["folders"]["pdf_catalog"])  # PDF file storage folder
-MODEL_NAME = CONFIG["model"]["name"]  # Model name
-INDEX_DIR = Path(CONFIG["folders"]["metadata"]) / MODEL_NAME  # Index file directory
+IMAGE_FOLDERS = [Path("images")]  # Image storage folder
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}  # Supported image formats
+PDF_CATALOG_FOLDER = Path("catalog")  # PDF file storage folder
+MODEL_NAME = "clip-vit-b-32"  # Model name
+INDEX_DIR = Path("metadata-files") / MODEL_NAME  # Index file directory
 PATHS_FILE = INDEX_DIR / "paths.npz"  # Image paths file
 FEATURES_FILE = INDEX_DIR / "features.npy"  # Feature vectors file
 FAISS_INDEX_FILE = INDEX_DIR / "image_features.index"  # FAISS index file
 METADATA_FILE = INDEX_DIR / "metadata.json"  # Metadata file (captions, keywords)
-TOP_K = CONFIG["search"]["top_k"]  # Number of search results
-BATCH_SIZE = CONFIG["search"]["batch_size"]  # Batch processing size
-CLIP_MODEL = CONFIG["model"]["architecture"]  # CLIP model architecture
-CLIP_PRETRAINED = CONFIG["model"]["pretrained"]  # CLIP pretrained version
+TOP_K = 8  # Number of search results
+BATCH_SIZE = 8  # Batch processing size
+CLIP_MODEL = "ViT-B-32"  # CLIP model architecture
+CLIP_PRETRAINED = "openai"  # CLIP pretrained version
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # GPU or CPU
-EMBED_DIM = CONFIG["model"]["embedding_dim"]  # Embedding dimension
-PDF_MAX_KEYWORDS = CONFIG["pdf"]["max_keywords"]  # Max keywords to extract from PDF
-PDF_JPEG_QUALITY = CONFIG["pdf"]["jpeg_quality"]  # JPEG quality for PDF image extraction
-PDF_AI_ENABLED = CONFIG["pdf"].get("ai_analysis", {}).get("enabled", False)  # Enable AI analysis
-PDF_AI_MODEL = CONFIG["pdf"].get("ai_analysis", {}).get("model", "llama3.2")  # AI model
-PDF_AI_OLLAMA_URL = CONFIG["pdf"].get("ai_analysis", {}).get("ollama_url", "http://localhost:11434")  # Ollama URL
-PDF_AI_FIELDS = CONFIG["pdf"].get("ai_analysis", {}).get("fields", ["Project Name", "Location", "Client", "Role"])  # AI extraction fields
-PDF_AI_CAPTION_TEMPLATE = CONFIG["pdf"].get("ai_analysis", {}).get("caption_template", "{project_name}")  # Caption template
+EMBED_DIM = 512  # Embedding dimension
 
 # ===== Model Loading Functions =====
 @st.cache_resource(show_spinner=False)
@@ -403,13 +345,12 @@ def embed_text(query: str) -> np.ndarray:
     return vector / max(norm, 1e-12)
 
 
-def search_similar(vector: np.ndarray, top_k: int = TOP_K * 4) -> List[Tuple[str, float]]:
-    """Search for similar images using FAISS (returns more results for pagination)"""
+def search_similar(vector: np.ndarray, top_k: int = TOP_K) -> List[Tuple[str, float]]:
+    """Search for similar images using FAISS"""
     index = st.session_state.get("faiss_index")
     paths = st.session_state.get("indexed_paths", [])
     if index is None or not paths:
         return []
-    # Get more results than TOP_K to support pagination
     query = vector.astype(np.float32)[None, :]
     scores, indices = index.search(query, min(top_k, len(paths)))
     results: List[Tuple[str, float]] = []
@@ -432,40 +373,13 @@ def record_query_metrics(mode: str, duration: float):
     }
 
 
-def render_results(results: List[Tuple[str, float]], results_per_page: int = 8):
-    """Display search results with pagination"""
+def render_results(results: List[Tuple[str, float]]):
+    """Display search results"""
     if not results:
         st.info("No results yet. Build index or adjust query.")
         return
-    
-    # Initialize pagination state
-    if "current_page" not in st.session_state:
-        st.session_state.current_page = 1
-    
-    # Calculate pagination
-    total_results = len(results)
-    total_pages = (total_results + results_per_page - 1) // results_per_page
-    current_page = st.session_state.current_page
-    
-    # Ensure current page is valid
-    if current_page > total_pages:
-        st.session_state.current_page = total_pages
-        current_page = total_pages
-    if current_page < 1:
-        st.session_state.current_page = 1
-        current_page = 1
-    
-    # Get results for current page
-    start_idx = (current_page - 1) * results_per_page
-    end_idx = min(start_idx + results_per_page, total_results)
-    page_results = results[start_idx:end_idx]
-    
-    # Display results count and pagination info
-    st.markdown(f"**Found {total_results} results** · Showing {start_idx + 1}-{end_idx}")
-    
-    # Display results in grid
     cols = st.columns(4)
-    for idx, (img_path, score) in enumerate(page_results):
+    for idx, (img_path, score) in enumerate(results):
         col = cols[idx % len(cols)]
         with col:
             meta = st.session_state.get("metadata", {}).get(img_path, {})
@@ -484,34 +398,6 @@ def render_results(results: List[Tuple[str, float]], results_per_page: int = 8):
                 caption=full_caption,
                 width="stretch",
             )
-    
-    # Pagination controls
-    if total_pages > 1:
-        st.divider()
-        col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
-        
-        with col1:
-            if st.button("⏮️ First", key="page_first", disabled=(current_page == 1), use_container_width=True):
-                st.session_state.current_page = 1
-                st.rerun()
-        
-        with col2:
-            if st.button("◀️ Previous", key="page_prev", disabled=(current_page == 1), use_container_width=True):
-                st.session_state.current_page = current_page - 1
-                st.rerun()
-        
-        with col3:
-            st.markdown(f"<div style='text-align: center; padding: 8px;'>Page {current_page} of {total_pages}</div>", unsafe_allow_html=True)
-        
-        with col4:
-            if st.button("Next ▶️", key="page_next", disabled=(current_page == total_pages), use_container_width=True):
-                st.session_state.current_page = current_page + 1
-                st.rerun()
-        
-        with col5:
-            if st.button("Last ⏭️", key="page_last", disabled=(current_page == total_pages), use_container_width=True):
-                st.session_state.current_page = total_pages
-                st.rerun()
 
 
 def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
@@ -538,19 +424,190 @@ def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
     return saved
 
 
-# ===== Streamlit UI Application =====
-# Display title with last modified timestamp in top right corner
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.title("AI Image Similarity Search")
-with col2:
-    app_file = Path(__file__)
-    if app_file.exists():
-        # Convert to Hong Kong time (UTC+8)
-        hk_tz = timezone(timedelta(hours=8))
-        modified_time = datetime.fromtimestamp(app_file.stat().st_mtime, tz=hk_tz)
-        st.markdown(f"<div style='text-align: right; padding-top: 20px; color: #888; font-size: 0.85em;'>Last modified (HKT)<br>{modified_time.strftime('%Y-%m-%d %H:%M:%S')}</div>", unsafe_allow_html=True)
+# ===== PDF Processing Functions =====
+def save_pdf_to_catalog(pdf_file: UploadedFile, catalog_folder: Path) -> Path:
+    """
+    Save uploaded PDF to catalog folder
+    
+    Args:
+        pdf_file: Uploaded PDF file
+        catalog_folder: Target folder for PDF storage
+    
+    Returns:
+        Path to saved PDF file
+    """
+    catalog_folder.mkdir(parents=True, exist_ok=True)
+    
+    pdf_filename = Path(pdf_file.name).name
+    dest_path = catalog_folder / pdf_filename
+    
+    # Avoid duplicate filenames
+    counter = 1
+    stem = Path(pdf_file.name).stem
+    while dest_path.exists():
+        dest_path = catalog_folder / f"{stem}_{counter}.pdf"
+        counter += 1
+    
+    # Save PDF
+    with open(dest_path, "wb") as f:
+        f.write(pdf_file.read())
+    
+    return dest_path
 
+
+def extract_images_from_pdf(pdf_file: UploadedFile, output_folder: Path) -> Tuple[List[Path], str]:
+    """
+    Extract all embedded images from PDF and save them
+    
+    Args:
+        pdf_file: Uploaded PDF file
+        output_folder: Image output folder
+    
+    Returns:
+        (List of image paths, PDF filename)
+    """
+    if not PDF_SUPPORT:
+        raise ImportError("PDF support not available. Install PyMuPDF (fitz).")
+    
+    pdf_filename = Path(pdf_file.name).stem  # PDF filename (without extension)
+    pdf_bytes = pdf_file.read()
+    
+    # Open PDF using PyMuPDF
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    image_paths: List[Path] = []
+    
+    output_folder.mkdir(parents=True, exist_ok=True)
+    
+    img_counter = 1
+    
+    # Iterate through each page
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        
+        # Get all images on the page
+        image_list = page.get_images(full=True)
+        
+        for img_index, img_info in enumerate(image_list):
+            xref = img_info[0]  # Image xref number
+            
+            try:
+                # Extract image
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]  # Image format (png, jpeg, etc.)
+                
+                # Convert to PIL Image
+                img = Image.open(BytesIO(image_bytes))
+                
+                # Image filename format: pdfname_img1.jpg, pdfname_img2.jpg ...
+                img_filename = f"{pdf_filename}_img{img_counter}.jpg"
+                img_path = output_folder / img_filename
+                
+                # Avoid duplicate filenames
+                counter = 1
+                while img_path.exists():
+                    img_filename = f"{pdf_filename}_img{img_counter}_{counter}.jpg"
+                    img_path = output_folder / img_filename
+                    counter += 1
+                
+                # Save as JPEG
+                if img.mode in ("RGBA", "LA", "P"):
+                    # Convert transparent background to white
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "P":
+                        img = img.convert("RGBA")
+                    background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                    img = background
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+                
+                img.save(img_path, "JPEG", quality=85)
+                image_paths.append(img_path)
+                img_counter += 1
+                
+            except Exception as e:
+                st.warning(f"Unable to extract image (page {page_num + 1}, img {img_index + 1}): {str(e)}")
+                continue
+    
+    doc.close()
+    
+    return image_paths, pdf_filename
+
+
+def extract_text_from_pdf(pdf_file: UploadedFile) -> str:
+    """
+    Extract all text from PDF
+    
+    Args:
+        pdf_file: Uploaded PDF file
+    
+    Returns:
+        Extracted text content
+    """
+    if not PDF_SUPPORT:
+        raise ImportError("PDF support not available. Install PyPDF2.")
+    
+    pdf_bytes = pdf_file.read()
+    pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+    
+    all_text = []
+    for page in pdf_reader.pages:
+        text = page.extract_text()
+        if text:
+            all_text.append(text)
+    
+    return "\n\n".join(all_text)
+
+
+def extract_keywords_from_text(text: str, max_keywords: int = 5) -> List[str]:
+    """
+    Extract keywords from text
+    
+    Args:
+        text: Text content
+        max_keywords: Maximum number of keywords to return
+    
+    Returns:
+        List of keywords
+    """
+    import re
+    from collections import Counter
+    
+    # Common stop words (English and Chinese)
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+        "will", "would", "could", "should", "may", "might", "can", "this", "that", "these", "those",
+        "i", "you", "he", "she", "it", "we", "they", "them", "their", "its", "our", "your",
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "個", "上", "也", "說",
+        "出", "到", "時", "要", "以", "用", "著", "能", "之", "會", "後", "然", "沒", "很", "好", "來",
+        "page", "pages", "document", "file", "pdf", "image", "fig", "figure"
+    }
+    
+    # Remove special characters, keep letters, numbers, Chinese
+    text = text.lower()
+    words = re.findall(r'\b\w+\b', text)
+    
+    # Filter stop words and words that are too short
+    filtered_words = [
+        word for word in words 
+        if len(word) >= 3 and word not in stop_words
+    ]
+    
+    # Count word frequency
+    word_counts = Counter(filtered_words)
+    
+    # Get most common keywords
+    top_keywords = [word for word, count in word_counts.most_common(max_keywords * 2)]
+    
+    # Filter out pure numbers
+    keywords = [kw for kw in top_keywords if not kw.isdigit()][:max_keywords]
+    
+    return keywords
+
+
+# ===== Streamlit UI Application =====
+st.title("AI Image Similarity Search")
 load_index_into_session()
 
 view_mode = st.sidebar.radio(
@@ -600,50 +657,21 @@ if view_mode == "Indexing":
                         
                         # Extract images
                         pdf_file.seek(0)  # Reset file pointer
-                        image_paths, pdf_filename = extract_images_from_pdf(
-                            pdf_file, output_folder, jpeg_quality=PDF_JPEG_QUALITY
-                        )
+                        image_paths, pdf_filename = extract_images_from_pdf(pdf_file, output_folder)
                         
                         # Extract text
                         pdf_file.seek(0)  # Reset file pointer
                         extracted_text = extract_text_from_pdf(pdf_file)
                         
-                        # AI analysis (if enabled) - do this FIRST to get structured info
-                        ai_info = None
-                        smart_caption = None
-                        if PDF_AI_ENABLED and extracted_text.strip():
-                            try:
-                                with st.spinner("🤖 Analyzing with AI... (10-30 seconds)"):
-                                    ai_info = analyze_pdf_with_ai(
-                                        extracted_text,
-                                        custom_fields=PDF_AI_FIELDS,
-                                        ollama_url=PDF_AI_OLLAMA_URL,
-                                        model=PDF_AI_MODEL
-                                    )
-                                    
-                                    if "error" not in ai_info:
-                                        smart_caption = generate_smart_caption(ai_info, template=PDF_AI_CAPTION_TEMPLATE)
-                                        st.success(f"✓ AI Analysis: {smart_caption}")
-                                    else:
-                                        st.warning(f"⚠️ {ai_info.get('error', 'Unknown error')}")
-                            except Exception as e:
-                                st.warning(f"AI analysis failed: {str(e)}")
-                        
-                        # Extract keywords (now with AI info to prioritize structured data)
-                        suggested_keywords = extract_keywords_from_text(
-                            extracted_text, 
-                            max_keywords=PDF_MAX_KEYWORDS,
-                            ai_info=ai_info
-                        )
+                        # Extract keywords
+                        suggested_keywords = extract_keywords_from_text(extracted_text, max_keywords=5)
                         
                         all_extracted_images.extend(image_paths)
                         all_pdf_data.append({
                             "image_paths": image_paths,
                             "pdf_filename": pdf_filename,
                             "extracted_text": extracted_text,
-                            "suggested_keywords": suggested_keywords,
-                            "ai_info": ai_info,
-                            "smart_caption": smart_caption
+                            "suggested_keywords": suggested_keywords
                         })
                         
                         st.success(f"✓ Extracted {len(image_paths)} images from {pdf_file.name}")
@@ -659,33 +687,14 @@ if view_mode == "Indexing":
         # ===== Keywords Selection Interface =====
         if "pdf_extracted_data" in st.session_state:
             st.markdown("### 🏷️ Add Keywords for Extracted Images")
-            
-            # Show AI analysis toggle if available
-            if PDF_AI_ENABLED:
-                st.info("✨ AI Analysis is enabled. Extracted information will be shown below.")
-            else:
-                st.info("Review extracted text and enter keywords for each image. The PDF filename will be used as the caption.")
+            st.info("Review extracted text and enter keywords for each image. The PDF filename will be used as the caption.")
             
             for pdf_data in st.session_state["pdf_extracted_data"]:
                 pdf_filename = pdf_data["pdf_filename"]
                 image_paths = pdf_data["image_paths"]
                 extracted_text = pdf_data["extracted_text"]
-                ai_info = pdf_data.get("ai_info")
-                smart_caption = pdf_data.get("smart_caption")
                 
                 st.markdown(f"#### PDF: `{pdf_filename}.pdf`")
-                
-                # Display AI analysis results if available
-                if ai_info and "error" not in ai_info:
-                    with st.expander("🤖 AI Extracted Information", expanded=True):
-                        cols_ai = st.columns(2)
-                        for i, (field, value) in enumerate(ai_info.items()):
-                            col = cols_ai[i % 2]
-                            with col:
-                                st.markdown(f"**{field.replace('_', ' ').title()}:** {value}")
-                        
-                        if smart_caption:
-                            st.markdown(f"**📝 Suggested Caption:** `{smart_caption}`")
                 
                 # Display extracted text (for user reference)
                 with st.expander("📝 Extracted text from PDF (for reference)", expanded=False):
@@ -702,9 +711,6 @@ if view_mode == "Indexing":
                 suggested_keywords = pdf_data.get("suggested_keywords", [])
                 default_keywords_str = ", ".join(suggested_keywords)
                 
-                # Use smart caption if available, otherwise use PDF filename
-                default_caption = smart_caption if smart_caption else pdf_filename
-                
                 for idx, img_path in enumerate(image_paths):
                     col = cols[idx % 2]
                     with col:
@@ -713,18 +719,6 @@ if view_mode == "Indexing":
                         except:
                             st.warning(f"Cannot preview: {img_path.name}")
                         
-                        # Caption input (with AI-suggested caption if available)
-                        caption_key = f"caption_{pdf_filename}_{idx}"
-                        caption_input = st.text_input(
-                            f"Caption for {img_path.name}",
-                            key=caption_key,
-                            value=default_caption,
-                            help="Caption for this image (AI-suggested if enabled)"
-                        )
-                        
-                        st.session_state["pdf_keywords_input"][f"{str(img_path)}_caption"] = caption_input
-                        
-                        # Keywords input
                         keywords_key = f"keywords_{pdf_filename}_{idx}"
                         keywords_input = st.text_input(
                             f"Keywords for {img_path.name}",
@@ -750,15 +744,12 @@ if view_mode == "Indexing":
                         keywords_input = st.session_state["pdf_keywords_input"].get(img_path_str, "")
                         keywords_list = [k.strip() for k in keywords_input.split(",") if k.strip()]
                         
-                        # Get caption (AI-suggested or PDF filename)
-                        caption = st.session_state["pdf_keywords_input"].get(f"{img_path_str}_caption", pdf_filename)
-                        
                         # Normalize path
                         norm_path = normalize_path_key(img_path_str)
                         
-                        # Use AI-suggested caption or PDF filename
+                        # Use PDF filename as caption
                         metadata[norm_path] = {
-                            "caption": caption,
+                            "caption": f"{pdf_filename}.pdf",
                             "keywords": keywords_list
                         }
                 
@@ -877,23 +868,10 @@ else:
     # Search mode (default)
     st.divider()
     
-    # Validate that indexed paths still exist
-    indexed_paths = st.session_state.get("indexed_paths", [])
-    if indexed_paths:
-        # Check if paths are still valid
-        valid_paths = [p for p in indexed_paths if Path(p).exists()]
-        if len(valid_paths) != len(indexed_paths):
-            # Some paths are invalid, update session state
-            st.session_state["indexed_paths"] = valid_paths
-            indexed_paths = valid_paths
-            # Also clear search results since index changed
-            if "search_results" in st.session_state:
-                st.session_state.search_results = []
-    
-    if not indexed_paths:
+    if not st.session_state.get("indexed_paths"):
         st.warning("No index yet. Switch to \"Indexing\" and run a sync.")
     else:
-        st.caption(f"Images available for search: {len(indexed_paths)}")
+        st.caption(f"Images available for search: {len(st.session_state['indexed_paths'])}")
 
     search_mode = st.radio("Select search mode", ["Text search", "Image search"], horizontal=True)
 
@@ -902,50 +880,24 @@ else:
     if search_mode == "Text search":
         text_query = st.text_input("Describe what you need (e.g., glass roof, beach, sunset...)")
         if text_query.strip():
-            # Check if this is a new query
-            if st.session_state.get("last_query") != text_query.strip():
-                with st.spinner("Searching..."):
-                    start_time = perf_counter()
-                    query_vector = embed_text(text_query.strip())
-                    matches = search_similar(query_vector)
-                    duration = perf_counter() - start_time
-                    record_query_metrics("Text search", duration)
-                # Store results and reset page for new search
-                st.session_state.search_results = matches
-                st.session_state.last_query = text_query.strip()
-                st.session_state.current_page = 1
-            # Display stored results (only if they exist)
-            if st.session_state.get("search_results"):
-                render_results(st.session_state.search_results)
-        elif st.session_state.get("search_results"):
-            # Clear results when query is cleared
-            st.session_state.search_results = []
-            st.session_state.last_query = None
+            with st.spinner("Searching..."):
+                start_time = perf_counter()
+                query_vector = embed_text(text_query.strip())
+                matches = search_similar(query_vector)
+                duration = perf_counter() - start_time
+                record_query_metrics("Text search", duration)
+            render_results(matches)
     elif search_mode == "Image search":
         uploaded_file = st.file_uploader("Upload an image to find similar ones", type=["jpg", "jpeg", "png", "bmp", "gif", "webp"])
         if uploaded_file is not None:
             st.image(uploaded_file, caption="Your uploaded image (thumbnail)", width="stretch")
-            # Use file name and size as identifier
-            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-            # Check if this is a new upload
-            if st.session_state.get("last_upload") != file_id:
-                with st.spinner("Searching for similar images..."):
-                    start_time = perf_counter()
-                    query_vector = embed_uploaded_image(uploaded_file)
-                    matches = search_similar(query_vector)
-                    duration = perf_counter() - start_time
-                    record_query_metrics("Image search", duration)
-                # Store results and reset page for new search
-                st.session_state.search_results = matches
-                st.session_state.last_upload = file_id
-                st.session_state.current_page = 1
-            # Display stored results (only if they exist)
-            if st.session_state.get("search_results"):
-                render_results(st.session_state.search_results)
-        elif st.session_state.get("search_results"):
-            # Clear results when no file is uploaded
-            st.session_state.search_results = []
-            st.session_state.last_upload = None
+            with st.spinner("Searching for similar images..."):
+                start_time = perf_counter()
+                query_vector = embed_uploaded_image(uploaded_file)
+                matches = search_similar(query_vector)
+                duration = perf_counter() - start_time
+                record_query_metrics("Image search", duration)
+            render_results(matches)
 
     with metrics_container:
         metrics = st.session_state.get("last_metrics")
