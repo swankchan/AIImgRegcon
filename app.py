@@ -55,7 +55,7 @@ DEFAULT_CONFIG = {
         "jpeg_quality": 85,
         "ai_analysis": {
             "enabled": False,
-            "model": "gemma3:1b",
+            "model": "llama3.1:8b",
             "ollama_url": "http://localhost:11434",
             "fields": ["Project Name", "Location", "Client", "Contractor", "Date of Completion", "Role", "Description"],
             "caption_template": "{project_name}"
