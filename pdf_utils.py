@@ -227,9 +227,7 @@ def analyze_pdf_with_ai(
         raise ImportError("AI support not available. Install: pip install requests")
     
     ###############################
-    #                             #
     # Information to be extracted #
-    #                             #
     ###############################
     if custom_fields is None:
         custom_fields = ["Project Title", "Location of the Buildings", "Client's Name", "Contractor's Name", "Role"]
