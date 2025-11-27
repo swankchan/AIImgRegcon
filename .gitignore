@@ -30,7 +30,7 @@ metadata-files/
 *.npy
 *.idx
 *.pkl
-*.pdf
+# *.pdf
 
 # Streamlit cache
 .streamlit/
