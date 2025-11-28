@@ -8,7 +8,7 @@
   "model": {
     "name": "clip-vit-l-14",
     "architecture": "ViT-L-14",
-    "pretrained": "openai",
+    "pretrained": "datacomp_xl_s13b_b90k",
     "embedding_dim": 768
   },
   "search": {
