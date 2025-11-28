@@ -543,7 +543,7 @@ def save_library_uploads(files: Sequence[UploadedFile]) -> List[Path]:
 # Display title with last modified timestamp in top right corner
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.title("AI Image Similarity Search")
+    st.title("AI Image Search")
 with col2:
     app_file = Path(__file__)
     if app_file.exists():
