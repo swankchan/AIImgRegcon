@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # Persist your data outside the container
+      - ./images:/app/images
+      - ./catalog:/app/catalog
+      - ./metadata-files:/app/metadata-files
+      - ./config.json:/app/config.json:ro
+    restart: unless-stopped
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true

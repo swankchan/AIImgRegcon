@@ -21,7 +21,7 @@ repo-backup.bundle
 # Large image backup folder (already present in this workspace)
 images
 images backup/
-# catalog
+catalog
 catalog backup/
 metadata-files/
 
@@ -30,7 +30,7 @@ metadata-files/
 *.npy
 *.idx
 *.pkl
-# *.pdf
+*.pdf
 
 # Streamlit cache
 .streamlit/
@@ -43,3 +43,10 @@ secrets.json
 
 # Keep metadata-files (index) tracked by default; adjust if you want to ignore it
 # metadata-files/
+app 01 only AI search part.py
+app 03 b4 properties from file.py
+app 02 with pdf import function.py
+app 04 b4 separate pdf extraction.py
+INSTALL_OLLAMA.md
+OLLAMA_SETUP.md
+remove_images_backup.ps1
